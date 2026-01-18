@@ -1,0 +1,255 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// all SAS records are 80 bytes in length and padded with
+// ASCII blanks where necessary to reach this length
+const recordSize = 80
+
+// buffer for building 136 or 140 byte records
+var buffer []byte = []byte{}
+
+// states to keep track of XPORT headers
+type HeaderState int
+
+const (
+	NON_HEADER HeaderState = iota
+	LIB_HEADER
+	MEM_HEADER
+	DES_HEADER
+	NAM_HEADER
+	OBS_HEADER
+)
+
+// header structs
+type LibraryRecord struct {
+	sas_symbol1 [8]byte
+	sas_symbol2 [8]byte
+	sas_lib     [8]byte
+	sas_ver     [8]byte
+	sas_os      [8]byte
+	blanks      [24]byte
+	sas_create  [16]byte
+}
+
+type MemberRecord struct {
+	sas_symbol [8]byte
+	sas_dsname [8]byte
+	sas_data   [8]byte
+	sas_ver    [8]byte
+	sas_os     [8]byte
+	blanks     [24]byte
+	sas_create [16]byte
+}
+
+type MemberRecord2 struct {
+	dtmod_day    [2]byte
+	dtmod_month  [3]byte
+	dtmod_year   [2]byte
+	dtmod_colon1 [1]byte
+	dtmod_hour   [2]byte
+	dtmod_colon2 [1]byte
+	dtmod_minute [2]byte
+	dtmod_colon3 [1]byte
+	dtmod_second [2]byte
+	padding      [16]byte
+	ds_label     [40]byte
+	ds_type      [8]byte
+}
+
+type NameStrRecord struct {
+	ntype  [2]byte
+	nhfun  [2]byte
+	nlng   [2]byte
+	nvar0  [2]byte
+	nname  [8]byte
+	nlabel [40]byte
+	nform  [8]byte
+	nfl    [2]byte
+	nfd    [2]byte
+	nfj    [2]byte
+	nfill  [2]byte
+	niform [8]byte
+	nifl   [2]byte
+	nifd   [2]byte
+	npos   [4]byte
+	rest   [52]byte
+}
+
+type VariableRecord struct {
+	ntype  [2]byte
+	nhfun  [2]byte
+	nlng   [2]byte
+	nvar0  [2]byte
+	nname  [8]byte
+	nlabel [40]byte
+	nform  [8]byte
+	nfl    [2]byte
+	nfd    [2]byte
+	nfj    [2]byte
+	nfill  [2]byte
+	niform [8]byte
+	nifl   [2]byte
+	nifd   [2]byte
+	npos   [4]byte
+	rest   [52]byte
+}
+
+type Dataset struct {
+	descriptorSize int
+	numOfVars      int
+	LibRec         LibraryRecord
+	MemRec1        MemberRecord
+	MemRec2        MemberRecord2
+	NamRecs        []NameStrRecord
+	VarRecs        []VariableRecord
+}
+
+func readXPT(path string) (*Dataset, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	r := bufio.NewReader(f)
+	ds := &Dataset{}
+
+	// set initial state
+	currentState := NON_HEADER
+
+	for {
+		rec, err := readRecord(r)
+
+		if err != nil {
+			panic(err)
+		}
+
+		// parse record by record and switch from one header state to the next as needed
+		rec_str := string(rec)
+		fmt.Println(rec_str)
+
+		// check if rec is a header record
+		if strings.Contains(rec_str, "HEADER RECORD*******") {
+			if strings.Contains(rec_str, "HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!") {
+				currentState = LIB_HEADER
+				continue
+			} else if strings.Contains(rec_str, "HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!") {
+				currentState = MEM_HEADER
+
+				// parse the MEMBER header record to understand whether NAMESTR and OBS are 140 or 136 bytes
+				parseMemHeader(rec, ds)
+				continue
+			} else if strings.Contains(rec_str, "HEADER RECORD*******DSCRPTR HEADER RECORD!!!!!!!") {
+				currentState = DES_HEADER
+				continue
+			} else if strings.Contains(rec_str, "HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!") {
+				currentState = NAM_HEADER
+
+				// parse the NAMESTR header record to get the number of vars expected
+				parseNamHeader(rec, ds)
+				continue
+			} else if strings.Contains(rec_str, "HEADER RECORD*******OBS     HEADER RECORD!!!!!!!") {
+				currentState = OBS_HEADER
+				continue
+			}
+		} else {
+			// not a header record - depending on current state, route accordingly
+			switch currentState {
+			case LIB_HEADER:
+				parseLibRecord(rec, ds)
+			case MEM_HEADER:
+				parseMemRecord(rec, ds)
+			case DES_HEADER:
+				parseDesRecord(rec, ds)
+			case NAM_HEADER:
+				parseNamRecord(rec, ds)
+			case OBS_HEADER:
+				parseObsRecord(rec, ds)
+			}
+		}
+	}
+}
+
+func readRecord(r *bufio.Reader) ([]byte, error) {
+	buf := make([]byte, recordSize)
+	_, err := io.ReadFull(r, buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func parseLibRecord(rec []byte, ds *Dataset) {
+
+}
+
+func parseMemHeader(rec []byte, ds *Dataset) {
+	// get the size of the variable descriptor record
+	// usually 140 bytes but 136 on VAX/VMS systems
+	desSize := string(rec[75:78])
+	if desSize == "140" {
+		ds.descriptorSize = 140
+	} else {
+		ds.descriptorSize = 136
+	}
+}
+
+func parseMemRecord(rec []byte, ds *Dataset) {
+
+}
+
+func parseDesRecord(rec []byte, ds *Dataset) {
+
+}
+
+func parseNamHeader(rec []byte, ds *Dataset) {
+	numOfVars, err := strconv.Atoi(string(rec[54:58]))
+
+	if err != nil {
+		panic(err)
+	}
+
+	ds.numOfVars = numOfVars
+}
+
+func parseNamRecord(rec []byte, ds *Dataset) {
+	buffer = append(buffer, rec...)
+	if len(buffer) >= ds.descriptorSize {
+		// select 136/140 bytes, this is a full namestr record
+		// retain the remainder in the buffer until another full record is reached
+		tmp := buffer[0:ds.descriptorSize]
+		buffer = buffer[ds.descriptorSize:]
+
+		nam := NameStrRecord{}
+		copy(nam.ntype[:], tmp[0:2])
+		copy(nam.nhfun[:], tmp[2:4])
+		copy(nam.nlng[:], tmp[4:6])
+		copy(nam.nvar0[:], tmp[6:8])
+		copy(nam.nname[:], tmp[8:16])
+		copy(nam.nlabel[:], tmp[16:56])
+		copy(nam.nform[:], tmp[56:64])
+		copy(nam.nfl[:], tmp[64:66])
+		copy(nam.nfd[:], tmp[66:68])
+		copy(nam.nfj[:], tmp[68:70])
+		copy(nam.nfill[:], tmp[70:72])
+		copy(nam.niform[:], tmp[72:80])
+		copy(nam.nifl[:], tmp[80:82])
+		copy(nam.nifd[:], tmp[82:84])
+		copy(nam.npos[:], tmp[84:86])
+		copy(nam.rest[:], tmp[86:])
+
+		ds.NamRecs = append(ds.NamRecs, nam)
+	}
+}
+
+func parseObsRecord(rec []byte, ds *Dataset) {
+
+}
