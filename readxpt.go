@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,7 @@ import (
 const recordSize = 80
 
 // buffer for building 136 or 140 byte records
+// also reused for building data rows with length Dataset.dataRecordSize
 var buffer []byte = []byte{}
 
 // states to keep track of XPORT headers
@@ -121,8 +123,9 @@ type VariableRecord struct {
 }
 
 type Dataset struct {
-	descriptorSize int
-	numOfVars      int
+	descriptorSize int // either 136 (VAX systems) or 140 bytes per NAMESTR record
+	numOfVars      int // how many variables are expected in the dataset
+	dataRecordSize int // how many bytes are occupied by one row of the dataset
 	LibRec         LibraryRecord
 	MemRec1        MemberRecord
 	MemRec2        MemberRecord2
@@ -176,6 +179,12 @@ func readXPT(path string) (*Dataset, error) {
 				continue
 			} else if strings.Contains(rec_str, "HEADER RECORD*******OBS     HEADER RECORD!!!!!!!") {
 				currentState = OBS_HEADER
+
+				// calculate how long each data record is expected to be based on the sizes defined in the NAMESTR records
+				calculateDataRecordSize(ds)
+
+				// clear the buffer of any namestr remnants
+				buffer = []byte{}
 				continue
 			}
 		} else {
@@ -203,6 +212,18 @@ func readRecord(r *bufio.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+func calculateDataRecordSize(ds *Dataset) {
+	for _, nstr := range ds.NamRecs {
+		varlen, err := strconv.Atoi(hex.EncodeToString(nstr.nlng[:]))
+
+		if err != nil {
+			panic(err)
+		}
+
+		ds.dataRecordSize += varlen
+	}
 }
 
 func parseLibRecord(rec []byte, ds *Dataset) {
@@ -269,5 +290,11 @@ func parseNamRecord(rec []byte, ds *Dataset) {
 }
 
 func parseObsRecord(rec []byte, ds *Dataset) {
+	buffer = append(buffer, rec...)
+	if len(buffer) >= ds.dataRecordSize {
+		tmp := buffer[0:ds.dataRecordSize]
+		buffer = buffer[ds.dataRecordSize:]
 
+		fmt.Println(string(tmp))
+	}
 }
