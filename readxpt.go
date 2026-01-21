@@ -122,6 +122,21 @@ type VariableRecord struct {
 	rest   [52]byte
 }
 
+// Human friendly alternative to VariableRecord struct
+type Variable struct {
+	varnum int
+	name   string
+	label  string
+	length int
+	data   []DataCell
+}
+
+// Human friendly struct for data cells
+type DataCell struct {
+	value_numeric float64
+	value_char    string
+}
+
 type Dataset struct {
 	descriptorSize int // either 136 (VAX systems) or 140 bytes per NAMESTR record
 	numOfVars      int // how many variables are expected in the dataset
@@ -131,6 +146,7 @@ type Dataset struct {
 	MemRec2        MemberRecord2
 	NamRecs        []NameStrRecord
 	VarRecs        []VariableRecord
+	Vars           []Variable
 }
 
 func readXPT(path string) (*Dataset, error) {
@@ -155,7 +171,7 @@ func readXPT(path string) (*Dataset, error) {
 
 		// parse record by record and switch from one header state to the next as needed
 		rec_str := string(rec)
-		fmt.Println(rec_str)
+		//fmt.Println(rec_str)
 
 		// check if rec is a header record
 		if strings.Contains(rec_str, "HEADER RECORD*******") {
@@ -215,14 +231,8 @@ func readRecord(r *bufio.Reader) ([]byte, error) {
 }
 
 func calculateDataRecordSize(ds *Dataset) {
-	for _, nstr := range ds.NamRecs {
-		varlen, err := strconv.Atoi(hex.EncodeToString(nstr.nlng[:]))
-
-		if err != nil {
-			panic(err)
-		}
-
-		ds.dataRecordSize += varlen
+	for _, Var := range ds.Vars {
+		ds.dataRecordSize += Var.length
 	}
 }
 
@@ -286,6 +296,16 @@ func parseNamRecord(rec []byte, ds *Dataset) {
 		copy(nam.rest[:], tmp[86:])
 
 		ds.NamRecs = append(ds.NamRecs, nam)
+
+		// human friendly var, i.e., not just a bunch of bytes
+		tmp_var := Variable{}
+		tmp_var.varnum, _ = strconv.Atoi(hex.EncodeToString(nam.nvar0[:]))
+		tmp_var.length, _ = strconv.Atoi(hex.EncodeToString(nam.nlng[:]))
+		tmp_var.name = strings.TrimSpace(string(nam.nname[:]))
+		tmp_var.label = strings.TrimSpace(string(nam.nlabel[:]))
+		tmp_var.data = []DataCell{}
+
+		ds.Vars = append(ds.Vars, tmp_var)
 	}
 }
 
