@@ -24,5 +24,6 @@ const disclaimer string = "go-xpt  Copyright (C) 2026 Jan van der Linde\nThis pr
 
 func main() {
 	fmt.Println(disclaimer)
-	readXPT("/Users/jvdl/Programming/github.com/janvdl/go-term-dataset-viewer/sampledata/nonmem.xpt")
+	ds, _ := readXPT("/Users/jvdl/Programming/github.com/janvdl/go-term-dataset-viewer/sampledata/nonmem.xpt")
+	fmt.Println(ds.numOfVars)
 }

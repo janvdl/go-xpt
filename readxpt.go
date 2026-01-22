@@ -21,8 +21,8 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
-	"fmt"
 	"io"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -38,6 +38,7 @@ var buffer []byte = []byte{}
 
 // states to keep track of XPORT headers
 type HeaderState int
+type VariableType int
 
 const (
 	NON_HEADER HeaderState = iota
@@ -46,6 +47,11 @@ const (
 	DES_HEADER
 	NAM_HEADER
 	OBS_HEADER
+)
+
+const (
+	NUMERIC VariableType = iota
+	CHARACTER
 )
 
 // header structs
@@ -124,11 +130,12 @@ type VariableRecord struct {
 
 // Human friendly alternative to VariableRecord struct
 type Variable struct {
-	varnum int
-	name   string
-	label  string
-	length int
-	data   []DataCell
+	varnum  int
+	name    string
+	label   string
+	length  int
+	vartype VariableType
+	data    []DataCell
 }
 
 // Human friendly struct for data cells
@@ -166,7 +173,8 @@ func readXPT(path string) (*Dataset, error) {
 		rec, err := readRecord(r)
 
 		if err != nil {
-			panic(err)
+			log.Println(err.Error())
+			break
 		}
 
 		// parse record by record and switch from one header state to the next as needed
@@ -219,6 +227,8 @@ func readXPT(path string) (*Dataset, error) {
 			}
 		}
 	}
+
+	return ds, err
 }
 
 func readRecord(r *bufio.Reader) ([]byte, error) {
@@ -231,8 +241,9 @@ func readRecord(r *bufio.Reader) ([]byte, error) {
 }
 
 func calculateDataRecordSize(ds *Dataset) {
-	for _, Var := range ds.Vars {
-		ds.dataRecordSize += Var.length
+	for i := range ds.Vars {
+		v := &ds.Vars[i]
+		ds.dataRecordSize += v.length
 	}
 }
 
@@ -298,23 +309,45 @@ func parseNamRecord(rec []byte, ds *Dataset) {
 		ds.NamRecs = append(ds.NamRecs, nam)
 
 		// human friendly var, i.e., not just a bunch of bytes
-		tmp_var := Variable{}
-		tmp_var.varnum, _ = strconv.Atoi(hex.EncodeToString(nam.nvar0[:]))
-		tmp_var.length, _ = strconv.Atoi(hex.EncodeToString(nam.nlng[:]))
-		tmp_var.name = strings.TrimSpace(string(nam.nname[:]))
-		tmp_var.label = strings.TrimSpace(string(nam.nlabel[:]))
-		tmp_var.data = []DataCell{}
+		v := Variable{}
+		v.varnum, _ = strconv.Atoi(hex.EncodeToString(nam.nvar0[:]))
+		v.length, _ = strconv.Atoi(hex.EncodeToString(nam.nlng[:]))
+		v.name = strings.TrimSpace(string(nam.nname[:]))
+		v.label = strings.TrimSpace(string(nam.nlabel[:]))
+		v.data = []DataCell{}
 
-		ds.Vars = append(ds.Vars, tmp_var)
+		if vartype, _ := strconv.Atoi(hex.EncodeToString(nam.ntype[:])); vartype == 1 {
+			v.vartype = NUMERIC
+		} else {
+			v.vartype = CHARACTER
+		}
+
+		ds.Vars = append(ds.Vars, v)
 	}
 }
 
 func parseObsRecord(rec []byte, ds *Dataset) {
+	// TODO: parse missings according to XPT standards doc
+
 	buffer = append(buffer, rec...)
 	if len(buffer) >= ds.dataRecordSize {
-		tmp := buffer[0:ds.dataRecordSize]
-		buffer = buffer[ds.dataRecordSize:]
+		for i := range ds.Vars {
+			v := &ds.Vars[i]
 
-		fmt.Println(string(tmp))
+			l := v.length
+			tmp := strings.TrimSpace(string(buffer[0:l]))
+			buffer = buffer[l:]
+
+			d := DataCell{}
+
+			if v.vartype == NUMERIC {
+				d.value_char = tmp
+				d.value_numeric, _ = strconv.ParseFloat(d.value_char, 64)
+			} else {
+				d.value_char = tmp
+			}
+
+			v.data = append(v.data, d)
+		}
 	}
 }
