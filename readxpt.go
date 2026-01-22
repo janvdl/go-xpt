@@ -21,6 +21,7 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -157,6 +158,7 @@ type Dataset struct {
 }
 
 func readXPT(path string) (*Dataset, error) {
+	eof := false
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -169,12 +171,18 @@ func readXPT(path string) (*Dataset, error) {
 	// set initial state
 	currentState := NON_HEADER
 
-	for {
+	for !eof {
 		rec, err := readRecord(r)
 
 		if err != nil {
 			log.Println(err.Error())
-			break
+
+			if err.Error() == "EOF" {
+				eof = true
+				break
+			} else {
+				return ds, err
+			}
 		}
 
 		// parse record by record and switch from one header state to the next as needed
@@ -234,9 +242,11 @@ func readXPT(path string) (*Dataset, error) {
 func readRecord(r *bufio.Reader) ([]byte, error) {
 	buf := make([]byte, recordSize)
 	_, err := io.ReadFull(r, buf)
+
 	if err != nil {
-		return nil, err
+		return buf, err
 	}
+
 	return buf, nil
 }
 
@@ -328,14 +338,17 @@ func parseNamRecord(rec []byte, ds *Dataset) {
 
 func parseObsRecord(rec []byte, ds *Dataset) {
 	// TODO: parse missings according to XPT standards doc
+	// TODO: EOF hits, but only a subset of data rows are parsed - why?
 
 	buffer = append(buffer, rec...)
-	if len(buffer) >= ds.dataRecordSize {
+	for len(buffer) >= ds.dataRecordSize {
 		for i := range ds.Vars {
 			v := &ds.Vars[i]
 
 			l := v.length
 			tmp := strings.TrimSpace(string(buffer[0:l]))
+			fmt.Println(tmp)
+			fmt.Println("====================")
 			buffer = buffer[l:]
 
 			d := DataCell{}
