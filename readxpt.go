@@ -21,7 +21,6 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -187,7 +186,6 @@ func readXPT(path string) (*Dataset, error) {
 
 		// parse record by record and switch from one header state to the next as needed
 		rec_str := string(rec)
-		//fmt.Println(rec_str)
 
 		// check if rec is a header record
 		if strings.Contains(rec_str, "HEADER RECORD*******") {
@@ -292,7 +290,7 @@ func parseNamHeader(rec []byte, ds *Dataset) {
 
 func parseNamRecord(rec []byte, ds *Dataset) {
 	buffer = append(buffer, rec...)
-	if len(buffer) >= ds.descriptorSize {
+	for len(buffer) >= ds.descriptorSize {
 		// select 136/140 bytes, this is a full namestr record
 		// retain the remainder in the buffer until another full record is reached
 		tmp := buffer[0:ds.descriptorSize]
@@ -347,8 +345,6 @@ func parseObsRecord(rec []byte, ds *Dataset) {
 
 			l := v.length
 			tmp := strings.TrimSpace(string(buffer[0:l]))
-			fmt.Println(tmp)
-			fmt.Println("====================")
 			buffer = buffer[l:]
 
 			d := DataCell{}
