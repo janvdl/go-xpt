@@ -20,9 +20,11 @@ package main
 
 import (
 	"bufio"
-	"encoding/hex"
+	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -186,6 +188,7 @@ func readXPT(path string) (*Dataset, error) {
 
 		// parse record by record and switch from one header state to the next as needed
 		rec_str := string(rec)
+		fmt.Println(rec_str)
 
 		// check if rec is a header record
 		if strings.Contains(rec_str, "HEADER RECORD*******") {
@@ -318,13 +321,13 @@ func parseNamRecord(rec []byte, ds *Dataset) {
 
 		// human friendly var, i.e., not just a bunch of bytes
 		v := Variable{}
-		v.varnum, _ = strconv.Atoi(hex.EncodeToString(nam.nvar0[:]))
-		v.length, _ = strconv.Atoi(hex.EncodeToString(nam.nlng[:]))
+		v.varnum = int(binary.BigEndian.Uint16(nam.nvar0[:]))
+		v.length = int(binary.BigEndian.Uint16(nam.nlng[:]))
 		v.name = strings.TrimSpace(string(nam.nname[:]))
 		v.label = strings.TrimSpace(string(nam.nlabel[:]))
 		v.data = []DataCell{}
 
-		if vartype, _ := strconv.Atoi(hex.EncodeToString(nam.ntype[:])); vartype == 1 {
+		if vartype := int(binary.BigEndian.Uint16(nam.ntype[:])); vartype == 1 {
 			v.vartype = NUMERIC
 		} else {
 			v.vartype = CHARACTER
@@ -336,7 +339,6 @@ func parseNamRecord(rec []byte, ds *Dataset) {
 
 func parseObsRecord(rec []byte, ds *Dataset) {
 	// TODO: parse missings according to XPT standards doc
-	// TODO: EOF hits, but only a subset of data rows are parsed - why?
 
 	buffer = append(buffer, rec...)
 	for len(buffer) >= ds.dataRecordSize {
@@ -344,19 +346,47 @@ func parseObsRecord(rec []byte, ds *Dataset) {
 			v := &ds.Vars[i]
 
 			l := v.length
-			tmp := strings.TrimSpace(string(buffer[0:l]))
+			tmp := buffer[0:l]
 			buffer = buffer[l:]
 
 			d := DataCell{}
 
 			if v.vartype == NUMERIC {
-				d.value_char = tmp
-				d.value_numeric, _ = strconv.ParseFloat(d.value_char, 64)
+				d.value_numeric = ibmFloat64(tmp)
+				d.value_char = fmt.Sprintf("%f", d.value_numeric)
 			} else {
-				d.value_char = tmp
+				d.value_char = strings.TrimSpace(string(tmp))
 			}
 
 			v.data = append(v.data, d)
 		}
 	}
+}
+
+// XPT files are always stored as Big-endian
+// this function converts the IBM floating-point format to a float64
+func ibmFloat64(b []byte) float64 {
+	if len(b) != 8 {
+		panic("IBM float must be 8 bytes")
+	}
+
+	// all zero = 0.0
+	if b[0]|b[1]|b[2]|b[3]|b[4]|b[5]|b[6]|b[7] == 0 {
+		return 0
+	}
+
+	sign := (b[0] & 0x80) != 0
+	exponent := int(b[0]&0x7F) - 64
+
+	// fraction is base-16
+	var frac float64
+	for i := 1; i < 8; i++ {
+		frac += float64(b[i]) / math.Pow(256, float64(i))
+	}
+
+	val := frac * math.Pow(16, float64(exponent))
+	if sign {
+		val = -val
+	}
+	return val
 }
