@@ -111,7 +111,7 @@ type NameStrRecord struct {
 	rest   [52]byte
 }
 
-// Human friendly alternative to VariableRecord struct
+// Variable struct for observation records
 type Variable struct {
 	varnum  int
 	name    string
@@ -121,7 +121,7 @@ type Variable struct {
 	data    []DataCell
 }
 
-// Human friendly struct for data cells
+// Data cell struct to be packed into Variables
 type DataCell struct {
 	value_numeric float64
 	value_char    string
