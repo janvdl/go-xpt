@@ -111,25 +111,6 @@ type NameStrRecord struct {
 	rest   [52]byte
 }
 
-type VariableRecord struct {
-	ntype  [2]byte
-	nhfun  [2]byte
-	nlng   [2]byte
-	nvar0  [2]byte
-	nname  [8]byte
-	nlabel [40]byte
-	nform  [8]byte
-	nfl    [2]byte
-	nfd    [2]byte
-	nfj    [2]byte
-	nfill  [2]byte
-	niform [8]byte
-	nifl   [2]byte
-	nifd   [2]byte
-	npos   [4]byte
-	rest   [52]byte
-}
-
 // Human friendly alternative to VariableRecord struct
 type Variable struct {
 	varnum  int
@@ -154,7 +135,6 @@ type Dataset struct {
 	MemRec1        MemberRecord
 	MemRec2        MemberRecord2
 	NamRecs        []NameStrRecord
-	VarRecs        []VariableRecord
 	Vars           []Variable
 }
 
