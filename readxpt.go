@@ -140,7 +140,7 @@ type Dataset struct {
 	Vars           []Variable
 }
 
-func readXPT(path string) (*Dataset, error) {
+func ReadXPT(path string) (*Dataset, error) {
 	eof := false
 	f, err := os.Open(path)
 	if err != nil {
