@@ -127,6 +127,8 @@ type DataCell struct {
 	value_char    string
 }
 
+// this brings all the elements together into one Dataset struct
+// this will be returned once the XPT is parsed
 type Dataset struct {
 	descriptorSize int // either 136 (VAX systems) or 140 bytes per NAMESTR record
 	numOfVars      int // how many variables are expected in the dataset
@@ -168,7 +170,6 @@ func readXPT(path string) (*Dataset, error) {
 
 		// parse record by record and switch from one header state to the next as needed
 		rec_str := string(rec)
-		fmt.Println(rec_str)
 
 		// check if rec is a header record
 		if strings.Contains(rec_str, "HEADER RECORD*******") {
@@ -239,7 +240,7 @@ func calculateDataRecordSize(ds *Dataset) {
 }
 
 func parseLibRecord(rec []byte, ds *Dataset) {
-
+	// unused
 }
 
 func parseMemHeader(rec []byte, ds *Dataset) {
@@ -254,11 +255,11 @@ func parseMemHeader(rec []byte, ds *Dataset) {
 }
 
 func parseMemRecord(rec []byte, ds *Dataset) {
-
+	// unused
 }
 
 func parseDesRecord(rec []byte, ds *Dataset) {
-
+	// unused
 }
 
 func parseNamHeader(rec []byte, ds *Dataset) {
@@ -369,4 +370,35 @@ func ibmFloat64(b []byte) float64 {
 		val = -val
 	}
 	return val
+}
+
+// returns a simple 2-dimensional string grid for a quick look at the data
+func (ds *Dataset) AsSimpleGrid() [][]string {
+	// simplified dataset 2D grid
+	dss := [][]string{}
+
+	varnames := []string{}
+	for _, v := range ds.Vars {
+		varnames = append(varnames, v.name)
+	}
+	if len(varnames) > 0 {
+		dss = append(dss, varnames)
+	}
+
+	if ds.numOfVars > 0 {
+		numOfRows := len(ds.Vars[0].data)
+		for idx_r := range numOfRows {
+			// temporary row values
+			curr_row := []string{}
+
+			// build row by row and
+			for idx_v := range ds.numOfVars {
+				curr_row = append(curr_row, ds.Vars[idx_v].data[idx_r].value_char)
+			}
+
+			dss = append(dss, curr_row)
+		}
+	}
+
+	return dss
 }

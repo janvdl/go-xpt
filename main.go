@@ -24,6 +24,4 @@ const disclaimer string = "go-xpt  Copyright (C) 2026 Jan van der Linde\nThis pr
 
 func main() {
 	fmt.Println(disclaimer)
-	ds, _ := readXPT("sample.xpt")
-	fmt.Println(ds.numOfVars)
 }
