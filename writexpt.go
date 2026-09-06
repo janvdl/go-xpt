@@ -1,23 +1,22 @@
-/*
-	go-xpt: an open-source, Go solution to reading/writing XPT (SAS Transport) files.
-    Copyright (C) 2026  Jan van der Linde
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
+// Copyright 2026 Jan van der Linde
+// SPDX-License-Identifier: Apache-2.0
 
 package goxpt
 
-func writeXPT() {
-	// TODO
+import (
+	"errors"
+	"io"
+)
+
+// errNotImplemented is returned by the write API until it is finished.
+var errNotImplemented = errors.New("goxpt: writing XPT files is not implemented yet")
+
+// WriteXPT serialises ds to w in XPORT version 5 format.
+//
+// Not implemented yet: it currently always returns an error. The signature is
+// stable so callers can wire it up ahead of time.
+func WriteXPT(w io.Writer, ds *Dataset) error {
+	_ = w
+	_ = ds
+	return errNotImplemented
 }

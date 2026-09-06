@@ -1,404 +1,399 @@
-/*
-	go-xpt: an open-source, Go solution to reading/writing XPT (SAS Transport) files.
-    Copyright (C) 2026  Jan van der Linde
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
+// Copyright 2026 Jan van der Linde
+// SPDX-License-Identifier: Apache-2.0
 
 package goxpt
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
-	"log"
-	"math"
 	"os"
 	"strconv"
 	"strings"
-)
-
-// all SAS records are 80 bytes in length and padded with
-// ASCII blanks where necessary to reach this length
-const recordSize = 80
-
-// buffer for building 136 or 140 byte records
-// also reused for building data rows with length Dataset.dataRecordSize
-var buffer []byte = []byte{}
-
-// states to keep track of XPORT headers
-type HeaderState int
-type VariableType int
-
-const (
-	NON_HEADER HeaderState = iota
-	LIB_HEADER
-	MEM_HEADER
-	DES_HEADER
-	NAM_HEADER
-	OBS_HEADER
+	"time"
 )
 
 const (
-	NUMERIC VariableType = iota
-	CHARACTER
+	// recordSize is the fixed length of every physical record in an XPT file.
+	recordSize = 80
+
+	// headerPrefix begins every XPORT header record. The record type marker
+	// (e.g. "MEMBER  HEADER RECORD") follows immediately after it.
+	headerPrefix = "HEADER RECORD*******"
+
+	// xptTimeLayout matches the "ddMMMyy:hh:mm:ss" datetimes in the headers.
+	xptTimeLayout = "02Jan06:15:04:05"
 )
 
-// header structs
-type LibraryRecord struct {
-	sas_symbol1 [8]byte
-	sas_symbol2 [8]byte
-	sas_lib     [8]byte
-	sas_ver     [8]byte
-	sas_os      [8]byte
-	blanks      [24]byte
-	sas_create  [16]byte
-}
-
-type MemberRecord struct {
-	sas_symbol [8]byte
-	sas_dsname [8]byte
-	sas_data   [8]byte
-	sas_ver    [8]byte
-	sas_os     [8]byte
-	blanks     [24]byte
-	sas_create [16]byte
-}
-
-type MemberRecord2 struct {
-	dtmod_day    [2]byte
-	dtmod_month  [3]byte
-	dtmod_year   [2]byte
-	dtmod_colon1 [1]byte
-	dtmod_hour   [2]byte
-	dtmod_colon2 [1]byte
-	dtmod_minute [2]byte
-	dtmod_colon3 [1]byte
-	dtmod_second [2]byte
-	padding      [16]byte
-	ds_label     [40]byte
-	ds_type      [8]byte
-}
-
-type NameStrRecord struct {
-	ntype  [2]byte
-	nhfun  [2]byte
-	nlng   [2]byte
-	nvar0  [2]byte
-	nname  [8]byte
-	nlabel [40]byte
-	nform  [8]byte
-	nfl    [2]byte
-	nfd    [2]byte
-	nfj    [2]byte
-	nfill  [2]byte
-	niform [8]byte
-	nifl   [2]byte
-	nifd   [2]byte
-	npos   [4]byte
-	rest   [52]byte
-}
-
-// Variable struct for observation records
-type Variable struct {
-	varnum  int
-	name    string
-	label   string
-	length  int
-	vartype VariableType
-	data    []DataCell
-}
-
-// Data cell struct to be packed into Variables
-type DataCell struct {
-	value_numeric float64
-	value_char    string
-}
-
-// this brings all the elements together into one Dataset struct
-// this will be returned once the XPT is parsed
-type Dataset struct {
-	descriptorSize int // either 136 (VAX systems) or 140 bytes per NAMESTR record
-	numOfVars      int // how many variables are expected in the dataset
-	dataRecordSize int // how many bytes are occupied by one row of the dataset
-	LibRec         LibraryRecord
-	MemRec1        MemberRecord
-	MemRec2        MemberRecord2
-	NamRecs        []NameStrRecord
-	Vars           []Variable
-}
-
-func ReadXPT(path string) (*Dataset, error) {
-	eof := false
+// ReadXPTFile opens path and parses every member with [ReadXPT].
+func ReadXPTFile(path string) ([]*Dataset, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return ReadXPT(f)
+}
 
-	r := bufio.NewReader(f)
-	ds := &Dataset{}
+// ReadXPT parses every member (dataset) contained in an XPT stream. Most XPT
+// files hold exactly one member, so callers commonly use the result's first
+// element.
+//
+// The observation section of an XPT file records neither a row count nor an
+// end marker; it is simply blank-padded to a multiple of 80 bytes. ReadXPT
+// stops at the last non-blank row. A genuine trailing observation whose every
+// value is blank (an all-character row of missings) is therefore indistinguishable
+// from padding and will be dropped.
+func ReadXPT(r io.Reader) ([]*Dataset, error) {
+	br, ok := r.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(r)
+	}
+	return (&reader{src: br}).run()
+}
 
-	// set initial state
-	currentState := NON_HEADER
+type parseState int
 
-	for !eof {
-		rec, err := readRecord(r)
+const (
+	stateStart parseState = iota
+	stateLibrary
+	stateMember
+	stateDescriptor
+	stateNamestr
+	stateObs
+)
 
+// reader holds the state for a single ReadXPT call. It is not reused or shared.
+type reader struct {
+	src   *bufio.Reader
+	rec   [recordSize]byte
+	state parseState
+
+	lib      LibraryInfo
+	libRecs  [][]byte // real header records following LIBRARY HEADER
+	descRecs [][]byte // real header records following DSCRPTR HEADER
+	leftover []byte   // bytes carried across records for NAMESTR / OBS parsing
+
+	datasets []*Dataset
+	cur      *Dataset // member currently being built
+}
+
+func (rd *reader) run() ([]*Dataset, error) {
+	for {
+		_, err := io.ReadFull(rd.src, rd.rec[:])
+		switch {
+		case err == nil:
+			if e := rd.handleRecord(); e != nil {
+				return nil, e
+			}
+		case errors.Is(err, io.EOF):
+			if e := rd.finish(); e != nil {
+				return nil, e
+			}
+			return rd.datasets, nil
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			return nil, fmt.Errorf("goxpt: truncated stream: length is not a multiple of %d bytes", recordSize)
+		default:
+			return nil, fmt.Errorf("goxpt: reading record: %w", err)
+		}
+	}
+}
+
+func (rd *reader) finish() error {
+	rd.finalizeLibrary()
+	rd.finalizeMember()
+	return rd.finalizeObs()
+}
+
+func (rd *reader) handleRecord() error {
+	rec := rd.rec[:]
+	if bytes.HasPrefix(rec, []byte(headerPrefix)) {
+		return rd.handleHeader(rec)
+	}
+
+	switch rd.state {
+	case stateLibrary:
+		rd.libRecs = append(rd.libRecs, cloneRecord(rec))
+	case stateDescriptor:
+		rd.descRecs = append(rd.descRecs, cloneRecord(rec))
+	case stateNamestr:
+		return rd.parseNamestr(rec)
+	case stateObs:
+		rd.parseObs(rec)
+	}
+	return nil
+}
+
+func (rd *reader) handleHeader(rec []byte) error {
+	switch {
+	case marker(rec, "LIBRARY HEADER RECORD"):
+		rd.state = stateLibrary
+		rd.libRecs = rd.libRecs[:0]
+
+	case marker(rec, "MEMBER  HEADER RECORD"):
+		rd.finalizeLibrary()
+		if err := rd.finalizeObs(); err != nil { // close the previous member, if any
+			return err
+		}
+		ds := &Dataset{Library: rd.lib, descriptorSize: descriptorSize(rec)}
+		rd.datasets = append(rd.datasets, ds)
+		rd.cur = ds
+		rd.state = stateMember
+
+	case marker(rec, "DSCRPTR HEADER RECORD"):
+		rd.state = stateDescriptor
+		rd.descRecs = rd.descRecs[:0]
+
+	case marker(rec, "NAMESTR HEADER RECORD"):
+		if rd.cur == nil {
+			return errors.New("goxpt: NAMESTR header before MEMBER header")
+		}
+		rd.finalizeMember()
+		n, err := namestrCount(rec)
 		if err != nil {
-			log.Println(err.Error())
-
-			if err.Error() == "EOF" {
-				eof = true
-				break
-			} else {
-				return ds, err
-			}
+			return err
 		}
+		rd.cur.numVars = n
+		rd.leftover = rd.leftover[:0]
+		rd.state = stateNamestr
 
-		// parse record by record and switch from one header state to the next as needed
-		rec_str := string(rec)
-
-		// check if rec is a header record
-		if strings.Contains(rec_str, "HEADER RECORD*******") {
-			if strings.Contains(rec_str, "HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!") {
-				currentState = LIB_HEADER
-				continue
-			} else if strings.Contains(rec_str, "HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!") {
-				currentState = MEM_HEADER
-
-				// parse the MEMBER header record to understand whether NAMESTR and OBS are 140 or 136 bytes
-				parseMemHeader(rec, ds)
-				continue
-			} else if strings.Contains(rec_str, "HEADER RECORD*******DSCRPTR HEADER RECORD!!!!!!!") {
-				currentState = DES_HEADER
-				continue
-			} else if strings.Contains(rec_str, "HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!") {
-				currentState = NAM_HEADER
-
-				// parse the NAMESTR header record to get the number of vars expected
-				parseNamHeader(rec, ds)
-				continue
-			} else if strings.Contains(rec_str, "HEADER RECORD*******OBS     HEADER RECORD!!!!!!!") {
-				currentState = OBS_HEADER
-
-				// calculate how long each data record is expected to be based on the sizes defined in the NAMESTR records
-				calculateDataRecordSize(ds)
-
-				// clear the buffer of any namestr remnants
-				buffer = []byte{}
-				continue
-			}
-		} else {
-			// not a header record - depending on current state, route accordingly
-			switch currentState {
-			case LIB_HEADER:
-				parseLibRecord(rec, ds)
-			case MEM_HEADER:
-				parseMemRecord(rec, ds)
-			case DES_HEADER:
-				parseDesRecord(rec, ds)
-			case NAM_HEADER:
-				parseNamRecord(rec, ds)
-			case OBS_HEADER:
-				parseObsRecord(rec, ds)
-			}
+	case marker(rec, "OBS     HEADER RECORD"):
+		if rd.cur == nil {
+			return errors.New("goxpt: OBS header before MEMBER header")
 		}
+		rd.cur.rowSize = observationSize(rd.cur.Variables)
+		rd.leftover = rd.leftover[:0]
+		rd.state = stateObs
 	}
-
-	return ds, err
+	return nil
 }
 
-func readRecord(r *bufio.Reader) ([]byte, error) {
-	buf := make([]byte, recordSize)
-	_, err := io.ReadFull(r, buf)
-
-	if err != nil {
-		return buf, err
+// finalizeLibrary decodes the two real header records that follow LIBRARY HEADER.
+func (rd *reader) finalizeLibrary() {
+	if len(rd.libRecs) == 0 {
+		return
 	}
-
-	return buf, nil
-}
-
-func calculateDataRecordSize(ds *Dataset) {
-	for i := range ds.Vars {
-		v := &ds.Vars[i]
-		ds.dataRecordSize += v.length
+	r1 := rd.libRecs[0]
+	rd.lib.SASVersion = trimField(r1[24:32])
+	rd.lib.OS = trimField(r1[32:40])
+	rd.lib.Created = parseXPTTime(r1[64:80])
+	if len(rd.libRecs) > 1 {
+		rd.lib.Modified = parseXPTTime(rd.libRecs[1][0:16])
 	}
+	rd.libRecs = rd.libRecs[:0]
 }
 
-func parseLibRecord(rec []byte, ds *Dataset) {
-	// unused
+// finalizeMember decodes the two real header records that follow DSCRPTR HEADER.
+func (rd *reader) finalizeMember() {
+	ds := rd.cur
+	if ds == nil || len(rd.descRecs) == 0 {
+		return
+	}
+	r1 := rd.descRecs[0]
+	ds.Member.Name = trimField(r1[8:16])
+	ds.Member.SASVersion = trimField(r1[24:32])
+	ds.Member.OS = trimField(r1[32:40])
+	ds.Member.Created = parseXPTTime(r1[64:80])
+	if len(rd.descRecs) > 1 {
+		r2 := rd.descRecs[1]
+		ds.Member.Modified = parseXPTTime(r2[0:16])
+		ds.Member.Label = trimField(r2[32:72])
+		ds.Member.Type = trimField(r2[72:80])
+	}
+	rd.descRecs = rd.descRecs[:0]
 }
 
-func parseMemHeader(rec []byte, ds *Dataset) {
-	// get the size of the variable descriptor record
-	// usually 140 bytes but 136 on VAX/VMS systems
-	desSize := string(rec[75:78])
-	if desSize == "140" {
+func (rd *reader) parseNamestr(rec []byte) error {
+	ds := rd.cur
+	if ds == nil {
+		return errors.New("goxpt: NAMESTR record before MEMBER header")
+	}
+	if ds.descriptorSize == 0 {
 		ds.descriptorSize = 140
-	} else {
-		ds.descriptorSize = 136
+	}
+
+	rd.leftover = append(rd.leftover, rec...)
+	for len(rd.leftover) >= ds.descriptorSize && len(ds.Variables) < ds.numVars {
+		v, err := parseNamestrRecord(rd.leftover[:ds.descriptorSize])
+		if err != nil {
+			return err
+		}
+		ds.Variables = append(ds.Variables, v)
+		rd.leftover = rd.leftover[ds.descriptorSize:]
+	}
+	return nil
+}
+
+func parseNamestrRecord(b []byte) (Variable, error) {
+	if len(b) < 88 {
+		return Variable{}, fmt.Errorf("goxpt: NAMESTR record too short: %d bytes", len(b))
+	}
+	u16 := func(off int) int { return int(binary.BigEndian.Uint16(b[off : off+2])) }
+
+	v := Variable{
+		Num:            u16(6),
+		Length:         u16(4),
+		Name:           trimField(b[8:16]),
+		Label:          trimField(b[16:56]),
+		Format:         trimField(b[56:64]),
+		FormatLength:   u16(64),
+		FormatDecimals: u16(66),
+		Informat:       trimField(b[72:80]),
+	}
+
+	switch code := u16(0); code {
+	case 1:
+		v.Type = TypeNumeric
+	case 2:
+		v.Type = TypeCharacter
+	default:
+		return Variable{}, fmt.Errorf("goxpt: variable %q: unknown type code %d", v.Name, code)
+	}
+	if v.Length < 1 || v.Length > 32767 {
+		return Variable{}, fmt.Errorf("goxpt: variable %q: invalid length %d", v.Name, v.Length)
+	}
+	if v.Type == TypeNumeric && v.Length > 8 {
+		return Variable{}, fmt.Errorf("goxpt: numeric variable %q: invalid length %d", v.Name, v.Length)
+	}
+	return v, nil
+}
+
+func (rd *reader) parseObs(rec []byte) {
+	ds := rd.cur
+	rd.leftover = append(rd.leftover, rec...)
+	if ds == nil || ds.rowSize <= 0 {
+		return
+	}
+	// A full row followed by at least one more physical record cannot be
+	// trailing padding: padding is always shorter than a record (80 bytes) and
+	// only appears at the very end of the observation section. Decode those
+	// rows now so the whole section need not be held in memory at once.
+	for len(rd.leftover) >= ds.rowSize+recordSize {
+		decodeRow(ds, rd.leftover[:ds.rowSize])
+		rd.leftover = rd.leftover[ds.rowSize:]
 	}
 }
 
-func parseMemRecord(rec []byte, ds *Dataset) {
-	// unused
-}
+func (rd *reader) finalizeObs() error {
+	ds := rd.cur
+	if ds == nil || rd.state != stateObs {
+		return nil
+	}
+	rd.state = stateStart
 
-func parseDesRecord(rec []byte, ds *Dataset) {
-	// unused
-}
-
-func parseNamHeader(rec []byte, ds *Dataset) {
-	numOfVars, err := strconv.Atoi(string(rec[54:58]))
-
-	if err != nil {
-		panic(err)
+	data := rd.leftover
+	rd.leftover = nil
+	if ds.rowSize <= 0 {
+		return nil
 	}
 
-	ds.numOfVars = numOfVars
+	pad := len(data) % ds.rowSize
+	if !allBlank(data[len(data)-pad:]) {
+		return fmt.Errorf("goxpt: member %q: corrupt OBS section, %d trailing bytes are not padding",
+			ds.Member.Name, pad)
+	}
+	realLen := len(data) - pad
+	// Drop trailing all-blank rows that lie inside the final padded record.
+	for realLen >= ds.rowSize &&
+		realLen-ds.rowSize >= len(data)-recordSize &&
+		allBlank(data[realLen-ds.rowSize:realLen]) {
+		realLen -= ds.rowSize
+	}
+	for off := 0; off+ds.rowSize <= realLen; off += ds.rowSize {
+		decodeRow(ds, data[off:off+ds.rowSize])
+	}
+	return nil
 }
 
-func parseNamRecord(rec []byte, ds *Dataset) {
-	buffer = append(buffer, rec...)
-	for len(buffer) >= ds.descriptorSize {
-		// select 136/140 bytes, this is a full namestr record
-		// retain the remainder in the buffer until another full record is reached
-		tmp := buffer[0:ds.descriptorSize]
-		buffer = buffer[ds.descriptorSize:]
+func decodeRow(ds *Dataset, row []byte) {
+	pos := 0
+	for i := range ds.Variables {
+		v := &ds.Variables[i]
+		if pos+v.Length > len(row) {
+			break
+		}
+		raw := row[pos : pos+v.Length]
+		pos += v.Length
 
-		nam := NameStrRecord{}
-		copy(nam.ntype[:], tmp[0:2])
-		copy(nam.nhfun[:], tmp[2:4])
-		copy(nam.nlng[:], tmp[4:6])
-		copy(nam.nvar0[:], tmp[6:8])
-		copy(nam.nname[:], tmp[8:16])
-		copy(nam.nlabel[:], tmp[16:56])
-		copy(nam.nform[:], tmp[56:64])
-		copy(nam.nfl[:], tmp[64:66])
-		copy(nam.nfd[:], tmp[66:68])
-		copy(nam.nfj[:], tmp[68:70])
-		copy(nam.nfill[:], tmp[70:72])
-		copy(nam.niform[:], tmp[72:80])
-		copy(nam.nifl[:], tmp[80:82])
-		copy(nam.nifd[:], tmp[82:84])
-		copy(nam.npos[:], tmp[84:86])
-		copy(nam.rest[:], tmp[86:])
-
-		ds.NamRecs = append(ds.NamRecs, nam)
-
-		// human friendly var, i.e., not just a bunch of bytes
-		v := Variable{}
-		v.varnum = int(binary.BigEndian.Uint16(nam.nvar0[:]))
-		v.length = int(binary.BigEndian.Uint16(nam.nlng[:]))
-		v.name = strings.TrimSpace(string(nam.nname[:]))
-		v.label = strings.TrimSpace(string(nam.nlabel[:]))
-		v.data = []DataCell{}
-
-		if vartype := int(binary.BigEndian.Uint16(nam.ntype[:])); vartype == 1 {
-			v.vartype = NUMERIC
+		var cell DataCell
+		if v.Type == TypeNumeric {
+			var buf [8]byte
+			copy(buf[:], raw) // short numerics are left-aligned; pad with zero bytes
+			cell.Numeric, cell.Missing, cell.MissingCode = ibmToFloat64(buf[:])
 		} else {
-			v.vartype = CHARACTER
+			cell.Char = strings.TrimRight(string(raw), " \x00")
 		}
-
-		ds.Vars = append(ds.Vars, v)
+		v.Data = append(v.Data, cell)
 	}
 }
 
-func parseObsRecord(rec []byte, ds *Dataset) {
-	// TODO: parse missings according to XPT standards doc
-
-	buffer = append(buffer, rec...)
-	for len(buffer) >= ds.dataRecordSize {
-		for i := range ds.Vars {
-			v := &ds.Vars[i]
-
-			l := v.length
-			tmp := buffer[0:l]
-			buffer = buffer[l:]
-
-			d := DataCell{}
-
-			if v.vartype == NUMERIC {
-				d.value_numeric = ibmFloat64(tmp)
-				d.value_char = fmt.Sprintf("%f", d.value_numeric)
-			} else {
-				d.value_char = strings.TrimSpace(string(tmp))
-			}
-
-			v.data = append(v.data, d)
-		}
-	}
+// marker reports whether rec is the header record for the given type.
+func marker(rec []byte, name string) bool {
+	const off = len(headerPrefix)
+	return len(rec) >= off && bytes.HasPrefix(rec[off:], []byte(name))
 }
 
-// XPT files are always stored as Big-endian
-// this function converts the IBM floating-point format to a float64
-func ibmFloat64(b []byte) float64 {
-	if len(b) != 8 {
-		panic("IBM float must be 8 bytes")
+// descriptorSize returns the NAMESTR/observation descriptor width declared in a
+// MEMBER header record: 136 on VAX/VMS, 140 everywhere else.
+func descriptorSize(rec []byte) int {
+	trailer := strings.TrimRight(string(rec), " \x00")
+	if strings.HasSuffix(trailer, "136") {
+		return 136
 	}
-
-	// all zero = 0.0
-	if b[0]|b[1]|b[2]|b[3]|b[4]|b[5]|b[6]|b[7] == 0 {
-		return 0
-	}
-
-	sign := (b[0] & 0x80) != 0
-	exponent := int(b[0]&0x7F) - 64
-
-	// fraction is base-16
-	var frac float64
-	for i := 1; i < 8; i++ {
-		frac += float64(b[i]) / math.Pow(256, float64(i))
-	}
-
-	val := frac * math.Pow(16, float64(exponent))
-	if sign {
-		val = -val
-	}
-	return val
+	return 140
 }
 
-// returns a simple 2-dimensional string grid for a quick look at the data
-func (ds *Dataset) AsSimpleGrid() [][]string {
-	// simplified dataset 2D grid
-	dss := [][]string{}
-
-	varnames := []string{}
-	for _, v := range ds.Vars {
-		varnames = append(varnames, v.name)
+// namestrCount returns the variable count declared in a NAMESTR header record.
+func namestrCount(rec []byte) (int, error) {
+	if len(rec) < 58 {
+		return 0, errors.New("goxpt: NAMESTR header record too short")
 	}
-	if len(varnames) > 0 {
-		dss = append(dss, varnames)
+	field := strings.TrimSpace(string(rec[54:58]))
+	n, err := strconv.Atoi(field)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("goxpt: invalid variable count %q in NAMESTR header", field)
 	}
+	return n, nil
+}
 
-	if ds.numOfVars > 0 {
-		numOfRows := len(ds.Vars[0].data)
-		for idx_r := range numOfRows {
-			// temporary row values
-			curr_row := []string{}
+func observationSize(vars []Variable) int {
+	n := 0
+	for i := range vars {
+		n += vars[i].Length
+	}
+	return n
+}
 
-			// build row by row and
-			for idx_v := range ds.numOfVars {
-				curr_row = append(curr_row, ds.Vars[idx_v].data[idx_r].value_char)
-			}
+func cloneRecord(rec []byte) []byte {
+	return append([]byte(nil), rec...)
+}
 
-			dss = append(dss, curr_row)
+func trimField(b []byte) string {
+	return strings.TrimRight(string(b), " \x00")
+}
+
+// allBlank reports whether b is empty or entirely ASCII spaces (the pad byte
+// mandated by the XPORT spec).
+func allBlank(b []byte) bool {
+	for _, c := range b {
+		if c != ' ' {
+			return false
 		}
 	}
+	return true
+}
 
-	return dss
+func parseXPTTime(b []byte) time.Time {
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(xptTimeLayout, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
